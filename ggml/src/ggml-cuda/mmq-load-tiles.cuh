@@ -261,7 +261,6 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 }
 
-#if !defined(GGML_USE_HIP)
 template <ggml_type type, int J, bool fallback>
 static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_ptq1_0(const char * __restrict__ x,
                                                                        int * __restrict__ x_tile,
@@ -307,8 +306,14 @@ static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_ptq1_0(const cha
 
         // Branch-free unpack: all 8 lanes run the same 5-iteration trit loop on their own 32-bit word. Only smem store offsets differ, so the warp does not diverge.
         const uint32_t packed = get_int_b4(bxi->qs, lane < 7 ? lane : 6);
+#if defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
+        // same [b0,0,b1,0] / [b2,0,b3,0] spread as vecdotq.cuh's HIP branch: sel byte <4 picks src1 byte, >=8 is a constant mode
+        uint32_t       v_lo   = (uint32_t) __builtin_amdgcn_perm(0, (int) packed, 0x0C010C00);
+        uint32_t       v_hi   = (uint32_t) __builtin_amdgcn_perm(0, (int) packed, 0x0C030C02);
+#else
         uint32_t       v_lo   = __byte_perm(packed, 0, 0x4140);   // bytes 0,1 as 16-bit lanes
         uint32_t       v_hi   = __byte_perm(packed, 0, 0x4342);   // bytes 2,3
+#endif // defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
         const bool     full_lane = lane < 6;
         v_hi = full_lane ? v_hi : v_lo;                           // lane 6: both halves walk qh0/qh1
         const int  dst_base   = lane < 4 ? lane : 16 + lane;      // lanes 4,5 -> 20,21
@@ -320,15 +325,24 @@ static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_ptq1_0(const cha
             const uint32_t w_hi = v_hi * 3;
             v_lo = w_lo & 0x00FF00FF;
             v_hi = w_hi & 0x00FF00FF;
+#if defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
+            q[t] = __vsub4((int) __builtin_amdgcn_perm((int) w_hi, (int) w_lo, 0x07050301), 0x01010101);
+#else
             q[t] = __vsub4(__byte_perm(w_lo, w_hi, 0x7531), 0x01010101);
+#endif // defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
             if (full_lane) {
                 row[dst_base + t * dst_stride] = q[t];
             }
         }
         if (lane == 6) {
             // q[t] = {qh0.t, qh1.t, qh0.t, qh1.t}; the old layout is {qh0.t, qh1.t, qh0.t+1, qh1.t+1}.
+#if defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
+            row[30] = __builtin_amdgcn_perm(q[1], q[0], 0x05040100);
+            row[31] = __builtin_amdgcn_perm(q[3], q[2], 0x05040100);
+#else
             row[30] = __byte_perm(q[0], q[1], 0x5410);
             row[31] = __byte_perm(q[2], q[3], 0x5410);
+#endif // defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
         }
     }
 
@@ -353,7 +367,6 @@ static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_ptq1_0(const cha
 #    endif
     }
 }
-#endif
 
 template <ggml_type type, int J, bool fallback> static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_q4_0(
         const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
